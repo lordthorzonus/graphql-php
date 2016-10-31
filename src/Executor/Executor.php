@@ -22,6 +22,7 @@ use GraphQL\Type\Definition\Type;
 use GraphQL\Type\DefinitionContainer;
 use GraphQL\Type\Introspection;
 use GraphQL\Utils;
+use React\Promise\Promise;
 
 /**
  * Terminology
@@ -67,7 +68,7 @@ class Executor
      * @param $contextValue
      * @param array|\ArrayAccess $variableValues
      * @param null $operationName
-     * @return ExecutionResult
+     * @return Promise
      */
     public static function execute(Schema $schema, Document $ast, $rootValue = null, $contextValue = null, $variableValues = null, $operationName = null)
     {
@@ -90,14 +91,23 @@ class Executor
 
         $exeContext = self::buildExecutionContext($schema, $ast, $rootValue, $contextValue, $variableValues, $operationName);
 
-        try {
-            $data = self::executeOperation($exeContext, $exeContext->operation, $rootValue);
-        } catch (Error $e) {
-            $exeContext->addError($e);
-            $data = null;
-        }
+        $promise = new Promise(function($resolve) use ($exeContext, $rootValue) {
+            $resolve(self::executeOperation($exeContext, $exeContext->operation, $rootValue));
+        });
 
-        return new ExecutionResult((array) $data, $exeContext->errors);
+        $promise->then(null, function($error) use ($exeContext) {
+            $exeContext->addError($error);
+            return null;
+        })->then(function($data) use ($exeContext) {
+
+            if(empty($exeContext->errors)) {
+                return new ExecutionResult($data);
+            }
+
+            return new ExecutionResult($data, $exeContext->errors);
+        });
+
+        return $promise;
     }
 
     /**
@@ -231,6 +241,8 @@ class Executor
                 // Undefined means that field is not defined in schema
                 $results[$responseName] = $result;
             }
+
+            if($result instanceof Promise) {}
         }
         // see #59
         if ([] === $results) {
@@ -243,11 +255,36 @@ class Executor
      * Implements the "Evaluating selection sets" section of the spec
      * for "read" mode.
      */
-    private static function executeFields(ExecutionContext $exeContext, ObjectType $parentType, $source, $path, $fields)
+    private static function executeFields(ExecutionContext $exeContext, ObjectType $parentType, $sourceValue, $path, $fields)
     {
-        // Native PHP doesn't support promises.
-        // Custom executor should be built for platforms like ReactPHP
-        return self::executeFieldsSerially($exeContext, $parentType, $source, $path, $fields);
+        $results = [];
+        $containsPromise = false;
+
+        foreach ($fields as $responseName => $fieldASTs) {
+            $fieldPath = $path;
+            $fieldPath[] = $responseName;
+            $result = self::resolveField($exeContext, $parentType, $sourceValue, $fieldASTs, $fieldPath);
+
+            if ($result !== self::$UNDEFINED) {
+                // Undefined means that field is not defined in schema
+                $results[$responseName] = $result;
+            }
+
+            if($result instanceof Promise) {
+                $containsPromise = true;
+            }
+        }
+
+        // see #59
+        if ([] === $results) {
+            $results = new \stdClass();
+        }
+
+        if(!$containsPromise) {
+            return $results;
+        }
+
+        return self::promiseForObject($results);
     }
 
 
@@ -510,7 +547,7 @@ class Executor
         // Otherwise, error protection is applied, logging the error and resolving
         // a null value for this field if one is encountered.
         try {
-            return self::completeValueWithLocatedError(
+            $completed = self::completeValueWithLocatedError(
                 $exeContext,
                 $returnType,
                 $fieldASTs,
@@ -518,6 +555,15 @@ class Executor
                 $path,
                 $result
             );
+
+            if($completed instanceof Promise) {
+                return $completed->then(null, function($error){
+                    return \React\Promise\resolve(null);
+                });
+            }
+
+            return $completed;
+
         } catch (Error $err) {
             // If `completeValueWithLocatedError` returned abruptly (threw an error), log the error
             // and return null.
@@ -550,7 +596,8 @@ class Executor
     )
     {
         try {
-            return self::completeValue(
+
+            $completed = self::completeValue(
                 $exeContext,
                 $returnType,
                 $fieldASTs,
@@ -558,6 +605,14 @@ class Executor
                 $path,
                 $result
             );
+
+            if($completed instanceof Promise) {
+                return $completed->then(null, function($error){
+                    \React\Promise\reject(Error::createLocatedError('rer'));
+                });
+            }
+
+            return $completed;
         } catch (\Exception $error) {
             throw Error::createLocatedError($error, $fieldASTs, $path);
         }
@@ -603,6 +658,20 @@ class Executor
         &$result
     )
     {
+
+        if($result instanceof  Promise) {
+            return $result->then(function($resolved) use ($exeContext, $returnType, $fieldASTs, $info, $path) {
+                return self::completeValue(
+                    $exeContext,
+                    $returnType,
+                    $fieldASTs,
+                    $info,
+                    $path,
+                    $resolved
+                );
+            });
+        }
+
         if ($result instanceof \Exception) {
             throw $result;
         }
@@ -783,6 +852,7 @@ class Executor
     private static function completeListValue(ExecutionContext $exeContext, ListOfType $returnType, $fieldASTs, ResolveInfo $info, $path, &$result)
     {
         $itemType = $returnType->getWrappedType();
+        $containsPromise = false;
         Utils::invariant(
             is_array($result) || $result instanceof \Traversable,
             'User Error: expected iterable, but did not find one for field ' . $info->parentType . '.' . $info->fieldName . '.'
@@ -792,8 +862,19 @@ class Executor
         $tmp = [];
         foreach ($result as $item) {
             $path[] = $i++;
-            $tmp[] = self::completeValueCatchingError($exeContext, $itemType, $fieldASTs, $info, $path, $item);
+            $completedItem = self::completeValueCatchingError($exeContext, $itemType, $fieldASTs, $info, $path, $item);
+
+            if(!$containsPromise && $completedItem instanceof Promise) {
+                $containsPromise = true;
+            }
+
+            $tmp[] = $completedItem;
         }
+
+        if($containsPromise) {
+            return \React\Promise\all($tmp);
+        }
+
         return $tmp;
     }
 
@@ -869,5 +950,15 @@ class Executor
         }
 
         return self::executeFields($exeContext, $returnType, $result, $path, $subFieldASTs);
+    }
+
+    /**
+     * @param $results
+     *
+     * @return \React\Promise\PromiseInterface
+     */
+    private static function promiseForObject($results)
+    {
+        return \React\Promise\all($results);
     }
 }
