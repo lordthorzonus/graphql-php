@@ -242,7 +242,12 @@ class Executor
                 $results[$responseName] = $result;
             }
 
-            if($result instanceof Promise) {}
+            if($result instanceof Promise) {
+                return $result->then(function ($resolvedResult) use ($responseName) {
+                    $results[$responseName] = $resolvedResult;
+                    return $results;
+                });
+            }
         }
         // see #59
         if ([] === $results) {
@@ -520,7 +525,7 @@ class Executor
      * @param ResolveInfo $info
      * @param $path
      * @param $result
-     * @return array|null
+     * @return array|null|Promise
      */
     private static function completeValueCatchingError(
         ExecutionContext $exeContext,
@@ -557,7 +562,8 @@ class Executor
             );
 
             if($completed instanceof Promise) {
-                return $completed->then(null, function($error){
+                return $completed->then(null, function($error) use ($exeContext){
+                    $exeContext->addError($error);
                     return \React\Promise\resolve(null);
                 });
             }
@@ -583,7 +589,7 @@ class Executor
      * @param ResolveInfo $info
      * @param $path
      * @param $result
-     * @return array|null
+     * @return array|null|Promise
      * @throws Error
      */
     static function completeValueWithLocatedError(
@@ -607,8 +613,8 @@ class Executor
             );
 
             if($completed instanceof Promise) {
-                return $completed->then(null, function($error){
-                    \React\Promise\reject(Error::createLocatedError('rer'));
+                return $completed->then(null, function($error) use ($fieldASTs, $path) {
+                    return \React\Promise\reject(Error::createLocatedError($error, $fieldASTs, $path));
                 });
             }
 
@@ -645,7 +651,7 @@ class Executor
      * @param ResolveInfo $info
      * @param array $path
      * @param $result
-     * @return array|null
+     * @return array|null|Promise
      * @throws Error
      * @throws \Exception
      */
@@ -656,8 +662,7 @@ class Executor
         ResolveInfo $info,
         $path,
         &$result
-    )
-    {
+    ) {
 
         if($result instanceof  Promise) {
             return $result->then(function($resolved) use ($exeContext, $returnType, $fieldASTs, $info, $path) {
@@ -846,7 +851,7 @@ class Executor
      * @param ResolveInfo $info
      * @param array $path
      * @param $result
-     * @return array
+     * @return array|Promise
      * @throws \Exception
      */
     private static function completeListValue(ExecutionContext $exeContext, ListOfType $returnType, $fieldASTs, ResolveInfo $info, $path, &$result)

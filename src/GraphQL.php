@@ -10,6 +10,7 @@ use GraphQL\Language\Source;
 use GraphQL\Type\Definition\Directive;
 use GraphQL\Validator\DocumentValidator;
 use GraphQL\Validator\Rules\QueryComplexity;
+use React\Promise\Promise;
 
 class GraphQL
 {
@@ -19,45 +20,69 @@ class GraphQL
      * @param mixed $rootValue
      * @param array <string, string>|null $variableValues
      * @param string|null $operationName
-     * @return array
+     *
+     * @return Promise
      */
-    public static function execute(Schema $schema, $requestString, $rootValue = null, $contextValue = null, $variableValues = null, $operationName = null)
-    {
-        return self::executeAndReturnResult($schema, $requestString, $rootValue, $contextValue, $variableValues, $operationName)->toArray();
+    public static function execute(
+        Schema $schema,
+        $requestString,
+        $rootValue = null,
+        $contextValue = null,
+        $variableValues = null,
+        $operationName = null
+    ) {
+        return self::executeAndReturnResult($schema, $requestString, $rootValue, $contextValue, $variableValues, $operationName);
     }
 
     /**
      * @param Schema $schema
      * @param $requestString
      * @param null $rootValue
+     * @param null $contextValue
      * @param null $variableValues
      * @param null $operationName
-     * @return array|ExecutionResult
+     *
+     * @return Promise
      */
-    public static function executeAndReturnResult(Schema $schema, $requestString, $rootValue = null, $contextValue = null, $variableValues = null, $operationName = null)
-    {
-        try {
-            if ($requestString instanceof Document) {
-                $documentAST = $requestString;
-            } else {
-                $source = new Source($requestString ?: '', 'GraphQL request');
-                $documentAST = Parser::parse($source);
+    public static function executeAndReturnResult(
+        Schema $schema,
+        $requestString,
+        $rootValue = null,
+        $contextValue = null,
+        $variableValues = null,
+        $operationName = null
+    ) {
+
+        $promise = new Promise(function ($resolve) use ($schema, $requestString, $rootValue, $contextValue, $variableValues, $operationName) {
+            try {
+                if ($requestString instanceof Document) {
+                    $documentAST = $requestString;
+                } else {
+                    $source = new Source($requestString ?: '', 'GraphQL request');
+                    $documentAST = Parser::parse($source);
+                }
+
+                /** @var QueryComplexity $queryComplexity */
+                $queryComplexity = DocumentValidator::getRule('QueryComplexity');
+                $queryComplexity->setRawVariableValues($variableValues);
+
+                $validationErrors = DocumentValidator::validate($schema, $documentAST);
+
+                if (!empty($validationErrors)) {
+                    return $resolve(new ExecutionResult(null, $validationErrors));
+                } else {
+                    return $resolve(Executor::execute($schema, $documentAST, $rootValue, $contextValue, $variableValues, $operationName));
+                }
+            } catch (Error $e) {
+                return $resolve(new ExecutionResult(null, [$e]));
             }
+        });
 
-            /** @var QueryComplexity $queryComplexity */
-            $queryComplexity = DocumentValidator::getRule('QueryComplexity');
-            $queryComplexity->setRawVariableValues($variableValues);
+        $promise->then(null, function ($error) {
+            return new ExecutionResult(null, $error);
+        });
 
-            $validationErrors = DocumentValidator::validate($schema, $documentAST);
-
-            if (!empty($validationErrors)) {
-                return new ExecutionResult(null, $validationErrors);
-            } else {
-                return Executor::execute($schema, $documentAST, $rootValue, $contextValue, $variableValues, $operationName);
-            }
-        } catch (Error $e) {
-            return new ExecutionResult(null, [$e]);
-        }
+        return $promise;
     }
 
     /**
