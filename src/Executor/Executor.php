@@ -22,6 +22,8 @@ use GraphQL\Type\Definition\Type;
 use GraphQL\Type\DefinitionContainer;
 use GraphQL\Type\Introspection;
 use GraphQL\Utils;
+use React\EventLoop\LoopInterface;
+use React\Promise\Deferred;
 use React\Promise\Promise;
 
 /**
@@ -92,20 +94,27 @@ class Executor
         $exeContext = self::buildExecutionContext($schema, $ast, $rootValue, $contextValue, $variableValues, $operationName);
 
         $promise = new Promise(function($resolve) use ($exeContext, $rootValue) {
-            $resolve(self::executeOperation($exeContext, $exeContext->operation, $rootValue));
+            $data = self::executeOperation($exeContext, $exeContext->operation, $rootValue);
+            if($data instanceof  Promise) {
+                $data->then(function($results) use(&$resolve, $exeContext) {
+
+                    if(empty($exeContext->errors)) {
+                        return $resolve((new ExecutionResult($results))->toArray());
+                    }
+
+                    return $resolve((new ExecutionResult($results, $exeContext->errors))->toArray());
+                });
+            } else {
+                return $resolve((new ExecutionResult($data))->toArray());
+            }
         });
 
         $promise->then(null, function($error) use ($exeContext) {
+
             $exeContext->addError($error);
             return null;
-        })->then(function($data) use ($exeContext) {
-
-            if(empty($exeContext->errors)) {
-                return new ExecutionResult($data);
-            }
-
-            return new ExecutionResult($data, $exeContext->errors);
         });
+
 
         return $promise;
     }
@@ -286,6 +295,7 @@ class Executor
         }
 
         if(!$containsPromise) {
+
             return $results;
         }
 
@@ -552,6 +562,7 @@ class Executor
         // Otherwise, error protection is applied, logging the error and resolving
         // a null value for this field if one is encountered.
         try {
+
             $completed = self::completeValueWithLocatedError(
                 $exeContext,
                 $returnType,
@@ -612,8 +623,12 @@ class Executor
                 $result
             );
 
+
+
             if($completed instanceof Promise) {
+
                 return $completed->then(null, function($error) use ($fieldASTs, $path) {
+
                     return \React\Promise\reject(Error::createLocatedError($error, $fieldASTs, $path));
                 });
             }
@@ -665,7 +680,9 @@ class Executor
     ) {
 
         if($result instanceof  Promise) {
+
             return $result->then(function($resolved) use ($exeContext, $returnType, $fieldASTs, $info, $path) {
+
                 return self::completeValue(
                     $exeContext,
                     $returnType,
@@ -678,12 +695,14 @@ class Executor
         }
 
         if ($result instanceof \Exception) {
+
             throw $result;
         }
 
         // If field type is NonNull, complete for inner type, and throw field error
         // if result is null.
         if ($returnType instanceof NonNull) {
+
             $completed = self::completeValue(
                 $exeContext,
                 $returnType->getWrappedType(),
@@ -702,11 +721,13 @@ class Executor
 
         // If result is null-like, return null.
         if (null === $result) {
+
             return null;
         }
 
         // If field type is List, complete each item in the list with the inner type
         if ($returnType instanceof ListOfType) {
+
             return self::completeListValue($exeContext, $returnType, $fieldASTs, $info, $path, $result);
         }
 
@@ -714,15 +735,18 @@ class Executor
         // null if serialization is not possible.
         if ($returnType instanceof ScalarType ||
             $returnType instanceof EnumType) {
+
             return self::completeLeafValue($returnType, $result);
         }
 
         if ($returnType instanceof AbstractType) {
+
             return self::completeAbstractValue($exeContext, $returnType, $fieldASTs, $info, $path, $result);
         }
 
         // Field type must be Object, Interface or Union and expect sub-selections.
         if ($returnType instanceof ObjectType) {
+
             return self::completeObjectValue($exeContext, $returnType, $fieldASTs, $info, $path, $result);
         }
 
@@ -808,6 +832,7 @@ class Executor
      */
     private static function completeAbstractValue(ExecutionContext $exeContext, AbstractType $returnType, $fieldASTs, ResolveInfo $info, $path, &$result)
     {
+
         $resolveType = $returnType->getResolveTypeFn();
 
         $runtimeType = $resolveType ?
@@ -856,6 +881,7 @@ class Executor
      */
     private static function completeListValue(ExecutionContext $exeContext, ListOfType $returnType, $fieldASTs, ResolveInfo $info, $path, &$result)
     {
+
         $itemType = $returnType->getWrappedType();
         $containsPromise = false;
         Utils::invariant(
@@ -919,6 +945,7 @@ class Executor
      */
     private static function completeObjectValue(ExecutionContext $exeContext, ObjectType $returnType, $fieldASTs, ResolveInfo $info, $path, &$result)
     {
+
         // If there is an isTypeOf predicate function, call it with the
         // current result. If isTypeOf returns false, then raise an error rather
         // than continuing execution.
@@ -958,12 +985,29 @@ class Executor
     }
 
     /**
-     * @param $results
+     * @param $object
      *
      * @return \React\Promise\PromiseInterface
      */
-    private static function promiseForObject($results)
+    private static function promiseForObject($object)
     {
-        return \React\Promise\all($results);
+        $keys = array_keys($object);
+        $valuesAndPromises = array_map(function($name) use($object) {
+            return $object[$name];
+        }, $keys);
+
+        $promise = \React\Promise\all($valuesAndPromises)->then(function($values) use($keys) {
+            $resultObject = [];
+            $index = 0;
+
+            foreach ($values as $value) {
+                $resultObject[$keys[$index]] = $value;
+                $index++;
+            }
+
+            return $resultObject;
+        });
+
+        return $promise;
     }
 }
