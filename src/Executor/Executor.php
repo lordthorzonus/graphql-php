@@ -96,16 +96,16 @@ class Executor
         $promise = new Promise(function($resolve) use ($exeContext, $rootValue) {
             $data = self::executeOperation($exeContext, $exeContext->operation, $rootValue);
             if($data instanceof  Promise) {
-                $data->then(function($results) use(&$resolve, $exeContext) {
+                return $data->then(function($results) use(&$resolve, $exeContext) {
 
                     if(empty($exeContext->errors)) {
-                        return $resolve((new ExecutionResult($results))->toArray());
+                        return $resolve((new ExecutionResult($results)));
                     }
 
-                    return $resolve((new ExecutionResult($results, $exeContext->errors))->toArray());
+                    return $resolve((new ExecutionResult($results, $exeContext->errors)));
                 });
             } else {
-                return $resolve((new ExecutionResult($data))->toArray());
+                return $resolve((new ExecutionResult($data)));
             }
         });
 
@@ -903,7 +903,9 @@ class Executor
         }
 
         if($containsPromise) {
-            return \React\Promise\all($tmp);
+            return \React\Promise\all($tmp)->then(function($result){
+                return array_values($result);
+            });
         }
 
         return $tmp;
